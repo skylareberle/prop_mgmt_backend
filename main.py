@@ -209,20 +209,16 @@ def create_property(prop: PropertyCreate, bq: bigquery.Client = Depends(get_bq_c
 def get_property(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
     """Returns a single property by ID."""
     query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = @property_id"
-    # We change "STRING" to "INT64" to match your BigQuery table
+    # Change "STRING" to "INT64" here
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("property_id", "INT64", property_id)
         ]
     )
-    try:
-        results = list(bq.query(query, job_config=job_config).result())
-        if not results:
-            raise HTTPException(status_code=404, detail="Property not found")
-        return dict(results[0])
-    except Exception as e:
-        # This will help you see the actual error in your terminal/logs
-        raise HTTPException(status_code=500, detail=f"BigQuery Error: {str(e)}")
+    results = list(bq.query(query, job_config=job_config).result())
+    if not results:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return dict(results[0])
 
 @app.delete("/properties/{property_id}")
 def delete_property(property_id: str, bq: bigquery.Client = Depends(get_bq_client)):
