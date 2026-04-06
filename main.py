@@ -2,17 +2,15 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.cloud import bigquery
 from pydantic import BaseModel
-from typing import Optional, List
-import uuid
+from typing import List, Optional
 from datetime import date
 
-app = FastAPI()
+app = FastAPI(title="Property Management API")
 
-# Enable CORS for frontend integration
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins (update for production)
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -20,10 +18,28 @@ app.add_middleware(
 PROJECT_ID = "project-1d951180-a0ea-4a20-bc3"
 DATASET = "property_mgmt"
 
-# ---------------------------------------------------------------------------
-# Pydantic Models
-# ---------------------------------------------------------------------------
+# --- Pydantic Models for Requests ---
+class IncomeCreate(BaseModel):
+    income_id: int
+    amount: float
+    date: date
+    description: Optional[str] = None
+
+class ExpenseCreate(BaseModel):
+    expense_id: int
+    amount: float
+    date: date
+    category: str
+    vendor: Optional[str] = None
+    description: Optional[str] = None
+
+class PropertyUpdate(BaseModel):
+    name: Optional[str] = None
+    tenant_name: Optional[str] = None
+    monthly_rent: Optional[float] = None
+
 class PropertyCreate(BaseModel):
+    property_id: int
     name: str
     address: str
     city: str
@@ -31,32 +47,9 @@ class PropertyCreate(BaseModel):
     postal_code: str
     property_type: str
     tenant_name: Optional[str] = None
-    monthly_rent: Optional[float] = 0.0
+    monthly_rent: float
 
-class PropertyUpdate(BaseModel):
-    name: Optional[str] = None
-    address: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    property_type: Optional[str] = None
-    tenant_name: Optional[str] = None
-    monthly_rent: Optional[float] = None
-
-class IncomeCreate(BaseModel):
-    amount: float
-    date: date
-    description: str
-
-class ExpenseCreate(BaseModel):
-    amount: float
-    date: date
-    description: str
-
-# ---------------------------------------------------------------------------
-# Dependency: BigQuery client
-# ---------------------------------------------------------------------------
-
+# --- Dependency ---
 def get_bq_client():
     client = bigquery.Client()
     try:
@@ -64,179 +57,109 @@ def get_bq_client():
     finally:
         client.close()
 
-
-# ---------------------------------------------------------------------------
-# Properties
-# ---------------------------------------------------------------------------
+# --- Required Endpoints ---
 
 @app.get("/properties")
 def get_properties(bq: bigquery.Client = Depends(get_bq_client)):
-    """
-    Returns all properties in the database.
-    """
-    query = f"""
-        SELECT
-            property_id,
-            name,
-            address,
-            city,
-            state,
-            postal_code,
-            property_type,
-            tenant_name,
-            monthly_rent
-        FROM `{PROJECT_ID}.{DATASET}.properties`
-        ORDER BY property_id
-    """
-
-    try:
-        results = bq.query(query).result()
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database query failed: {str(e)}"
-        )
-
-    properties = [dict(row) for row in results]
-    return properties
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.properties` ORDER BY property_id"
+    results = bq.query(query).result()
+    return [dict(row) for row in results]
 
 @app.get("/properties/{property_id}")
-def get_property(property_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    """Returns a single property by ID."""
-    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = @property_id"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("property_id", "STRING", property_id)]
-    )
-    
-    results = list(bq.query(query, job_config=job_config).result())
+def get_property(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = {property_id}"
+    results = list(bq.query(query).result())
     if not results:
         raise HTTPException(status_code=404, detail="Property not found")
     return dict(results[0])
 
 @app.get("/income/{property_id}")
-def get_property_income(property_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    """Returns all income records for a specific property."""
-    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.income` WHERE property_id = @property_id ORDER BY date DESC"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("property_id", "STRING", property_id)]
-    )
-    results = bq.query(query, job_config=job_config).result()
+def get_income(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.income` WHERE property_id = {property_id}"
+    results = bq.query(query).result()
     return [dict(row) for row in results]
 
-@app.post("/income/{property_id}", status_code=status.HTTP_201_CREATED)
-def create_income(property_id: str, income: IncomeCreate, bq: bigquery.Client = Depends(get_bq_client)):
-    """Creates a new income record for a property."""
-    income_id = str(uuid.uuid4())
-    query = f"""
-        INSERT INTO `{PROJECT_ID}.{DATASET}.income` (income_id, property_id, amount, date, description)
-        VALUES (@income_id, @property_id, @amount, @date, @description)
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("income_id", "STRING", income_id),
-            bigquery.ScalarQueryParameter("property_id", "STRING", property_id),
-            bigquery.ScalarQueryParameter("amount", "FLOAT64", income.amount),
-            bigquery.ScalarQueryParameter("date", "DATE", income.date),
-            bigquery.ScalarQueryParameter("description", "STRING", income.description),
-        ]
-    )
-    try:
-        bq.query(query, job_config=job_config).result()
-        return {"message": "Income created successfully", "income_id": income_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create income: {str(e)}")
+@app.post("/income/{property_id}", status_code=201)
+def create_income(property_id: int, income: IncomeCreate, bq: bigquery.Client = Depends(get_bq_client)):
+    rows_to_insert = [{
+        "income_id": income.income_id,
+        "property_id": property_id,
+        "amount": income.amount,
+        "date": str(income.date),
+        "description": income.description
+    }]
+    errors = bq.insert_rows_json(f"{PROJECT_ID}.{DATASET}.income", rows_to_insert)
+    if errors:
+        raise HTTPException(status_code=400, detail=f"Insert failed: {errors}")
+    return {"message": "Income record created"}
 
 @app.get("/expenses/{property_id}")
-def get_property_expenses(property_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    """Returns all expense records for a specific property."""
-    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.expenses` WHERE property_id = @property_id ORDER BY date DESC"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("property_id", "STRING", property_id)]
-    )
-    results = bq.query(query, job_config=job_config).result()
+def get_expenses(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.expenses` WHERE property_id = {property_id}"
+    results = bq.query(query).result()
     return [dict(row) for row in results]
 
-@app.post("/expenses/{property_id}", status_code=status.HTTP_201_CREATED)
-def create_expense(property_id: str, expense: ExpenseCreate, bq: bigquery.Client = Depends(get_bq_client)):
-    """Creates a new expense record for a property."""
-    expense_id = str(uuid.uuid4())
-    query = f"""
-        INSERT INTO `{PROJECT_ID}.{DATASET}.expenses` (expense_id, property_id, amount, date, description)
-        VALUES (@expense_id, @property_id, @amount, @date, @description)
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("expense_id", "STRING", expense_id),
-            bigquery.ScalarQueryParameter("property_id", "STRING", property_id),
-            bigquery.ScalarQueryParameter("amount", "FLOAT64", expense.amount),
-            bigquery.ScalarQueryParameter("date", "DATE", expense.date),
-            bigquery.ScalarQueryParameter("description", "STRING", expense.description),
-        ]
-    )
-    try:
-        bq.query(query, job_config=job_config).result()
-        return {"message": "Expense created successfully", "expense_id": expense_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create expense: {str(e)}")
+@app.post("/expenses/{property_id}", status_code=201)
+def create_expense(property_id: int, expense: ExpenseCreate, bq: bigquery.Client = Depends(get_bq_client)):
+    rows_to_insert = [{
+        "expense_id": expense.expense_id,
+        "property_id": property_id,
+        "amount": expense.amount,
+        "date": str(expense.date),
+        "category": expense.category,
+        "vendor": expense.vendor,
+        "description": expense.description
+    }]
+    errors = bq.insert_rows_json(f"{PROJECT_ID}.{DATASET}.expenses", rows_to_insert)
+    if errors:
+        raise HTTPException(status_code=400, detail=f"Insert failed: {errors}")
+    return {"message": "Expense record created"}
 
-# ---------------------------------------------------------------------------
-# Additional Endpoints
-# ---------------------------------------------------------------------------
+
+# --- Additional Endpoints ---
 
 @app.post("/properties", status_code=201)
 def create_property(prop: PropertyCreate, bq: bigquery.Client = Depends(get_bq_client)):
-    property_id = str(uuid.uuid4())
-    query = f"""
-        INSERT INTO `{PROJECT_ID}.{DATASET}.properties` 
-        (property_id, name, address, city, state, postal_code, property_type, tenant_name, monthly_rent)
-        VALUES (@id, @name, @addr, @city, @st, @zip, @type, @tenant, @rent)
-    """
-    params = [
-        bigquery.ScalarQueryParameter("id", "STRING", property_id),
-        bigquery.ScalarQueryParameter("name", "STRING", prop.name),
-        bigquery.ScalarQueryParameter("addr", "STRING", prop.address),
-        bigquery.ScalarQueryParameter("city", "STRING", prop.city),
-        bigquery.ScalarQueryParameter("st", "STRING", prop.state),
-        bigquery.ScalarQueryParameter("zip", "STRING", prop.postal_code),
-        bigquery.ScalarQueryParameter("type", "STRING", prop.property_type),
-        bigquery.ScalarQueryParameter("tenant", "STRING", prop.tenant_name),
-        bigquery.ScalarQueryParameter("rent", "FLOAT64", prop.monthly_rent),
-    ]
-    bq.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
-    return {"property_id": property_id}
-
-@app.get("/properties/{property_id}")
-def get_property(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
-    """Returns a single property by ID."""
-    query = f"SELECT * FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = @property_id"
-    # Change "STRING" to "INT64" here
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("property_id", "INT64", property_id)
-        ]
-    )
-    results = list(bq.query(query, job_config=job_config).result())
-    if not results:
-        raise HTTPException(status_code=404, detail="Property not found")
-    return dict(results[0])
+    """Creates a brand new property record."""
+    rows_to_insert = [prop.dict()]
+    errors = bq.insert_rows_json(f"{PROJECT_ID}.{DATASET}.properties", rows_to_insert)
+    if errors:
+        raise HTTPException(status_code=400, detail=f"Insert failed: {errors}")
+    return {"message": f"Property '{prop.name}' created successfully"}
 
 @app.delete("/properties/{property_id}")
-def delete_property(property_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = @id"
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("id", "STRING", property_id)])
-    bq.query(query, job_config=job_config).result()
-    return {"message": "Property deleted successfully"}
+def delete_property(property_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    """Deletes a property by ID."""
+    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.properties` WHERE property_id = {property_id}"
+    try:
+        bq.query(query).result()
+        return {"message": f"Property {property_id} and associated metadata removed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/tenants")
+def get_tenants(bq: bigquery.Client = Depends(get_bq_client)):
+    """Returns a list of all current tenants and the names of the properties they occupy."""
+    query = f"""
+        SELECT 
+            tenant_name, 
+            name as property_name 
+        FROM `{PROJECT_ID}.{DATASET}.properties` 
+        WHERE tenant_name IS NOT NULL
+    """
+    results = bq.query(query).result()
+    return [dict(row) for row in results]
 
 @app.delete("/income/{income_id}")
-def delete_income(income_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.income` WHERE income_id = @id"
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("id", "STRING", income_id)])
-    bq.query(query, job_config=job_config).result()
-    return {"message": "Income record deleted successfully"}
+def delete_income(income_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    """Removes a specific income record by ID."""
+    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.income` WHERE income_id = {income_id}"
+    bq.query(query).result()
+    return {"message": f"Income record {income_id} deleted"}
 
 @app.delete("/expenses/{expense_id}")
-def delete_expense(expense_id: str, bq: bigquery.Client = Depends(get_bq_client)):
-    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.expenses` WHERE expense_id = @id"
-    job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("id", "STRING", expense_id)])
-    bq.query(query, job_config=job_config).result()
-    return {"message": "Expense record deleted successfully"}
+def delete_expense(expense_id: int, bq: bigquery.Client = Depends(get_bq_client)):
+    """Removes a specific expense record by ID."""
+    query = f"DELETE FROM `{PROJECT_ID}.{DATASET}.expenses` WHERE expense_id = {expense_id}"
+    bq.query(query).result()
+    return {"message": f"Expense record {expense_id} deleted"}
